@@ -11,6 +11,7 @@
 #include "Framework/DataTypes.h"
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisHelpers.h"
+#include "CCDB/CcdbApi.h"
 #include "CCDB/BasicCCDBManager.h"
 #include "Common/DataModel/Multiplicity.h"
 #include "Common/DataModel/EventSelection.h"
@@ -31,11 +32,15 @@
 #include "ReconstructionDataFormats/PrimaryVertex.h"
 #include "ReconstructionDataFormats/VtxTrackIndex.h"
 #include "ReconstructionDataFormats/VtxTrackRef.h"
+#include "ReconstructionDataFormats/TrackFwd.h"
+#include "ReconstructionDataFormats/DCA.h"
+#include "ReconstructionDataFormats/Vertex.h"
 #include "DataFormatsITSMFT/ROFRecord.h"
 #include "CommonDataFormat/InteractionRecord.h"
 #include "DetectorsVertexing/PVertexerParams.h"
 #include "MathUtils/Primitive2D.h"
 #include "DataFormatsGlobalTracking/RecoContainer.h"
+#include "GlobalTracking/MatchGlobalFwd.h"
 #include "Common/DataModel/CollisionAssociationTables.h"
 #include "DataFormatsParameters/GRPMagField.h"
 #include "DataFormatsParameters/GRPObject.h"
@@ -44,6 +49,12 @@
 #include "DetectorsBase/Propagator.h"
 #include "DetectorsBase/GeometryManager.h"
 #include "EventFiltering/Zorro.h"
+
+#include "KFParticle.h"
+#include "KFPTrack.h"
+#include "KFPVertex.h"
+#include "KFParticleBase.h"
+#include "KFVertex.h"
 
 using namespace o2;
 using namespace o2::framework;
@@ -58,10 +69,7 @@ using MyEvents = soa::Join<aod::Collisions, aod::EvSels, aod::McCollisionLabels>
 using MyEventsWithMults = soa::Join<aod::Collisions, aod::EvSels, aod::Mults, aod::MultsExtra, aod::McCollisionLabels>;
 using MyEventsWithCent = soa::Join<aod::Collisions, aod::EvSels, aod::CentFT0Cs, aod::McCollisionLabels>;
 
-Preslice<aod::FwdTrackAssoc> perCollision = aod::track_association::collisionId;
-
-
-
+using BCsWithTimestamps = soa::Join<o2::aod::BCs, o2::aod::Timestamps>;
 
 struct DimuonAccEff {
     HistogramRegistry histos{"histos", {}, OutputObjHandlingPolicy::AnalysisObject};
@@ -87,8 +95,20 @@ struct DimuonAccEff {
     Configurable<double> fmatchingchi2cut{"fmatchingchi2cut", 3000, "single muon cut: matching chi2"};
     Configurable<double> fMuonMatchEtaMax{"fMuonMatchEtaMax", -2.5, "Refit eta max cut"};
     Configurable<double> fMuonMatchEtaMin{"fMuonMatchEtaMib", -3.6, "Refit eta min cut"};
+    Configurable<std::string> fConfigCcdbUrl{"ccdb-url", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
+        Service<o2::ccdb::BasicCCDBManager> ccdb;
+        o2::ccdb::CcdbApi ccdbApi;
+        o2::field::MagneticField* fieldB;
+        Configurable<std::string> geoPath{"geoPath", "GLO/Config/GeometryAligned", "Path of the geometry file"};
+        Configurable<std::string> grpmagPath{"grpmagPath", "GLO/Config/GRPMagField", "CCDB path of the GRPMagField object"};
+    int mRunNumber;
         
     void init(InitContext const&) {
+        ccdb->setURL(fConfigCcdbUrl);
+        ccdb->setCaching(true);
+        ccdb->setLocalObjectValidityChecking();
+        ccdb->setFatalWhenNull(false);
+        ccdbApi.init(fConfigCcdbUrl);
         const AxisSpec axisPDGcode{10000,-5000.5,4999.5};
         const AxisSpec axisPt{fHist_pt_width, fHist_pt_min, fHist_pt_max};
         const AxisSpec axisEta{fHist_eta_width, fHist_eta_min, fHist_eta_max};
@@ -149,6 +169,23 @@ struct DimuonAccEff {
         histos.add("dimuon_mass_SEPP", "dimuon_mass_SEPP", kTH1D, {axisMass});
         histos.add("dimuon_mass_SEMM", "dimuon_mass_SEMM", kTH1D, {axisMass});
     }
+
+    void initCCDB(BCsWithTimestamps::iterator const& bc){
+        if (mRunNumber == bc.runNumber()) {
+        return;
+        }
+        mRunNumber = bc.runNumber();
+        std::map<string, string> metadata;
+        auto soreor = o2::ccdb::BasicCCDBManager::getRunDuration(ccdbApi, mRunNumber);
+        auto ts = soreor.first;
+        auto grpmag = ccdbApi.retrieveFromTFileAny<o2::parameters::GRPMagField>(grpmagPath, metadata, ts);
+        o2::base::Propagator::initFieldFromGRP(grpmag);
+        if (!o2::base::GeometryManager::isGeometryLoaded()) {
+        ccdb->get<TGeoManager>(geoPath);
+        }
+        o2::mch::TrackExtrap::setField();
+        fieldB = static_cast<o2::field::MagneticField*>(TGeoGlobalMagField::Instance()->GetField());
+    }
     
     void calGenPhi(aod::McCollisions const& mcEvents,
                aod::McParticles const& mcTracks)
@@ -165,31 +202,24 @@ struct DimuonAccEff {
                 if (mcTrack.has_mothers()){
                     // MB 
                     if (mcTrack.has_daughters()) {
-                        //histos.fill(HIST("PDGcode_phi_mcTrack"),mcTrack.pdgCode());
                         auto mothers = mcTrack.mothers_as<aod::McParticles>();
                         auto daughters = mcTrack.daughters_as<aod::McParticles>();
 
                         // check mother and daughter PDG
                         int countP = 0;
                         int countmu = 0;
-                        //histos.fill(HIST("mothers"),mothers.size());
                             for(auto mother : mothers){
-                                //histos.fill(HIST("PDGcode_mother"),mother.pdgCode());
                                 if(mother.pdgCode()==2212){
                                     countP++;
                                 } 
                             };
                         
-                        //histos.fill(HIST("daughters"),daughters.size());
                             for(auto daughter : daughters){
-                                //histos.fill(HIST("PDGcode_daughters"),daughter.pdgCode());
-                                //std::cout << "daughterPDG = " << daughter.pdgCode()<< std::endl; 
+
                                 if(abs(daughter.pdgCode())==13){
                                     countmu++;
-                                    //std::cout << "daughterPDG = 13 " << std::endl; 
                                 }
                             };
-                            //std::cout << "==================" << std::endl; 
                         if(countmu == 2){
                             histos.fill(HIST("mcTrack_Phi_pt"), mcTrack.pt());
                             histos.fill(HIST("mcTrack_Phi_phi"), mcTrack.phi());
@@ -204,14 +234,10 @@ struct DimuonAccEff {
                         auto daughters = mcTrack.daughters_as<aod::McParticles>();
                         int countmu_nomother = 0;
                         for(auto daughter : daughters){
-                            //histos.fill(HIST("nomother_PDGcode_daughters"),daughter.pdgCode());
-                            //std::cout << "daughterPDG = " << daughter.pdgCode()<< std::endl; 
                             if(abs(daughter.pdgCode())==13){
                                 countmu_nomother++;
-                                //std::cout << "daughterPDG = 13 " << std::endl; 
                             }
                         };
-                        //std::cout << "==================" << std::endl; 
 
                         if(countmu_nomother == 2){
                             histos.fill(HIST("mcTrack_Phi_pt"), mcTrack.pt());
@@ -310,37 +336,79 @@ struct DimuonAccEff {
         }
     }
 
+    enum MuonExtrapolation {
+    // Index used to set different options for Muon propagation
+    kToVertex = 0, // propagtion to vertex by default
+    kToDCA,
+    kToRabs
+    };
 
-    template <typename TEvents, typename TMuons, typename TMCTracks>
-    void calRecoPhi(TEvents const& events,
+    template <typename TEvents, typename TMuons,typename TMFTs,typename TMCTracks>
+    void calRecoPhi(BCsWithTimestamps const& /*bcs*/,
+                    TEvents const& events,
                     aod::FwdTrackAssoc const& muonAssocs,
                     TMuons const& /*muons*/,
+                    TMFTs const& /*mfts*/,
                     TMCTracks const& mcTracks
                     ){
+        o2::mch::TrackExtrap::setField();
+        
+        double refitpx = 0;
+        double refitpy = 0;
+        double refitpz = 0;
+        double refitpt = 0;
+        double refiteta = 0;
+        double refitphi = 0;
+        double refitsign = 0;
+                
+        double refitpx1 = 0;
+        double refitpy1 = 0;
+        double refitpz1 = 0;
+        double refitpt1 = 0;
+        double refiteta1 = 0;
+        double refitphi1 = 0;
+        double refitsign1 = 0;
+
+        double refitpx2 = 0;
+        double refitpy2 = 0;
+        double refitpz2 = 0;
+        double refitpt2 = 0;
+        double refiteta2 = 0;
+        double refitphi2 = 0;
+        double refitsign2 = 0;
 
         for(auto assoc : muonAssocs){
             auto muon = assoc.template fwdtrack_as<TMuons>();
-            
-            //if (static_cast<int>(muon.trackType()) < 2) {
-            //    auto muontrack = muon.template matchMCHTrack_as<TMuons>();
-            //    if (muontrack.eta() < fMuonMatchEtaMin || muontrack.eta() > fMuonMatchEtaMax) {
-            //    continue;
-            //    }
-            //    auto mfttrack = muon.template matchMFTTrack_as<MyMFTTracks>();
-            //    for(auto event : events){
-            ///        VarManager::FillTrackCollision<TMuonFillMap>(muontrack, event);
-            //        VarManager::FillGlobalMuonRefit<TMuonFillMap>(muontrack, mfttrack, event);
-            //    }
-            //} else {
-            //    VarManager::FillTrackCollision<TMuonFillMap>(muon, collision);
-           // }
+            for(auto event : events){
+                if(muon.collisionId() == event.globalIndex()){
+                    //propagate muon and global refit
+                    if(muon.has_matchMCHTrack()&& muon.trackType()==0){
+                        auto fwdbc = event.template bc_as<BCsWithTimestamps>();
+                        initCCDB(fwdbc);
+                        auto muontrack = muon.template matchMCHTrack_as<TMuons>();
+                        auto mfttrack = muon.template matchMFTTrack_as<MyMFTTracks>();
+                        //propagate muontrack to dca
+                        o2::dataformats::GlobalFwdTrack propmuon = VarManager::PropagateMuon(muontrack, event, kToDCA);
+
+                        //Refit (use MUON track p and MFT track eta,phi)
+                        refitpx = propmuon.getP() * sin(M_PI / 2 - atan(mfttrack.tgl())) * cos(mfttrack.phi());
+                        refitpy = propmuon.getP() * sin(M_PI / 2 - atan(mfttrack.tgl())) * sin(mfttrack.phi());
+                        refitpz = propmuon.getP() * cos(M_PI / 2 - atan(mfttrack.tgl()));
+                        
+                            refitpt = std::sqrt(std::pow(refitpx, 2) + std::pow(refitpy, 2));
+                            refiteta = mfttrack.eta();
+                            refitphi =  mfttrack.phi();
+                            refitsign = muon.sign();
+                    }
+                }
+            }
 
             if(singleMuoncut(muon,true)){
                 if(mcMotherCut(muon,mcTracks,true)){
                     // mother <- phi only
-                    histos.fill(HIST("muon_pt"), muon.pt());
-                    histos.fill(HIST("muon_phi"), muon.phi());
-                    histos.fill(HIST("muon_eta"), muon.eta());
+                    histos.fill(HIST("muon_pt"), refitpt);
+                    histos.fill(HIST("muon_eta"), refiteta);
+                    histos.fill(HIST("muon_phi"), refitphi);
                 }
             };// end has_mcParticles
         }
@@ -352,8 +420,6 @@ struct DimuonAccEff {
         //ToDo: need to use groupedAssocs , but I can't
              //auto groupedAssocs = muonAssocs.sliceBy(perCollision, event.globalIndex());
              //std::cout << "groupedAssocs.size() = " <<groupedAssocs.size() << std::endl;
-            int sign1 = 0;
-            int sign2 = 0;
             for (auto& [a1, a2] : o2::soa::combinations(muonAssocs, muonAssocs)) {
                 if(!(a1.collisionId() == event.globalIndex() && a2.collisionId() == event.globalIndex())){
                     continue;
@@ -389,7 +455,7 @@ struct DimuonAccEff {
                         for(auto mcMother2 : mcMothers2){
                             if(mcMother1.pdgCode()==targetPdgCode && mcMother2.pdgCode() == targetPdgCode){
                                 if(mcMother1.globalIndex() == mcMother2.globalIndex()){
-                                    std::cout << "smae global index: t1 t2 mother" << std::endl;
+                                    //std::cout << "smae global index: t1 t2 mother" << std::endl;
                                     sameMother = true;
                                 }
                             }
@@ -398,24 +464,63 @@ struct DimuonAccEff {
                     if(!(sameMother)){
                         continue;
                     }
+                    //calculate track1(refit)
+                    //-------------------------------------
+                    if(t1.has_matchMCHTrack() && t1.trackType()==0){
+                        auto fwdbc1 = event.template bc_as<BCsWithTimestamps>();
+                        initCCDB(fwdbc1);
+                        auto muontrack1 = t1.template matchMCHTrack_as<TMuons>();
+                        auto mfttrack1 = t1.template matchMFTTrack_as<MyMFTTracks>();
+                        
+                        //propagate muontrack to dca
+                        o2::dataformats::GlobalFwdTrack propmuon1 = VarManager::PropagateMuon(muontrack1, event, kToDCA);
 
-                    sign1 = t1.sign();
-                    sign2 = t2.sign();
+                        //Refit (use MUON track p and MFT track eta,phi)
+                        refitpx1 = propmuon1.getP() * sin(M_PI / 2 - atan(mfttrack1.tgl())) * cos(mfttrack1.phi());
+                        refitpy1 = propmuon1.getP() * sin(M_PI / 2 - atan(mfttrack1.tgl())) * sin(mfttrack1.phi());
+                        refitpz1 = propmuon1.getP() * cos(M_PI / 2 - atan(mfttrack1.tgl()));
+                        
+                        refitpt1 = std::sqrt(std::pow(refitpx1, 2) + std::pow(refitpy1, 2));
+                        refiteta1 = mfttrack1.eta();
+                        refitphi1 =  mfttrack1.phi();
+                        refitsign1 = t1.sign();
+                    }
+                    ////----------------------------------
+
+                    //calculate track1(refit)
+                    //-------------------------------------
+                    if(t2.has_matchMCHTrack()&& t2.trackType()==0){
+                        auto muontrack2 = t2.template matchMCHTrack_as<TMuons>();
+                        auto mfttrack2 = t2.template matchMFTTrack_as<MyMFTTracks>();
+                        //propagate muontrack to dca
+                        o2::dataformats::GlobalFwdTrack propmuon2 = VarManager::PropagateMuon(muontrack2, event, kToDCA);
+
+                        //Refit (use MUON track p and MFT track eta,phi)
+                        refitpx2 = propmuon2.getP() * sin(M_PI / 2 - atan(mfttrack2.tgl())) * cos(mfttrack2.phi());
+                        refitpy2 = propmuon2.getP() * sin(M_PI / 2 - atan(mfttrack2.tgl())) * sin(mfttrack2.phi());
+                        refitpz2 = propmuon2.getP() * cos(M_PI / 2 - atan(mfttrack2.tgl()));
+                        
+                        refitpt2 = std::sqrt(std::pow(refitpx2, 2) + std::pow(refitpy2, 2));
+                        refiteta2 = mfttrack2.eta();
+                        refitphi2 =  mfttrack2.phi();
+                        refitsign2 = t2.sign();
+                    }
+                    ////----------------------------------
 
                     //calculate dimuon invariant mass
-                    ROOT::Math::PtEtaPhiMVector v1(t1.pt(), t1.eta(), t1.phi(), MuonMass);
-                    ROOT::Math::PtEtaPhiMVector v2(t2.pt(), t2.eta(), t2.phi(), MuonMass);
+                    ROOT::Math::PtEtaPhiMVector v1(refitpt1, refiteta1, refitphi1, MuonMass);
+                    ROOT::Math::PtEtaPhiMVector v2(refitpt2, refiteta2, refitphi2, MuonMass);
                     ROOT::Math::PtEtaPhiMVector v12 = v1 + v2;
                     dimuonMass = v12.M();
 
                     
-                    if(sign1 * sign2 > 0){
-                        if(sign1 > 0){
+                    if(refitsign1 * refitsign2 > 0){
+                        if(refitsign1 > 0){
                             histos.fill(HIST("dimuon_mass_SEPP"),dimuonMass);
-                        }else if(sign1 < 0){
+                        }else if(refitsign1 < 0){
                             histos.fill(HIST("dimuon_mass_SEMM"),dimuonMass);
                         }
-                    }else if(sign1 * sign2 < 0){
+                    }else if(refitsign1 * refitsign2 < 0){
                         histos.fill(HIST("dimuon_mass_SEPM"),dimuonMass);
                         histos.fill(HIST("dimuon_Phi_PtvsEta"),v12.pt(),v12.eta());
                     }
@@ -429,13 +534,16 @@ struct DimuonAccEff {
     };
 
     // main process
-    void process(MyEvents const& events,
-               aod::FwdTrackAssoc const& muonAssocs,
-               MyMuonsWithCov const& muons,
-               aod::McCollisions const& mcEvents,
-               aod::McParticles const& mcTracks){
+    void process(
+                BCsWithTimestamps const& bcs,
+                MyEvents const& events,
+                aod::FwdTrackAssoc const& muonAssocs,
+                MyMuonsWithCov const& muons,
+                MyMFTTracks const& mfts,
+                aod::McCollisions const& mcEvents,
+                aod::McParticles const& mcTracks){
         calGenPhi(mcEvents,mcTracks);
-        calRecoPhi(events,muonAssocs,muons,mcTracks);
+        calRecoPhi(bcs,events,muonAssocs,muons,mfts,mcTracks);
     }
 };
 

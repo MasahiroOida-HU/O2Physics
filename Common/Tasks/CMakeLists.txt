@@ -88,3 +88,8 @@ o2physics_add_dpl_workflow(decay-chain
                     SOURCES decayChainTracer.cxx
                     PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
+                   
+o2physics_add_dpl_workflow(flow-test
+                    SOURCES flowTest.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)

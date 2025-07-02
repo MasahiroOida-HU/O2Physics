@@ -35,6 +35,7 @@
 #include "TableHelper.h"
 #include "pidTOFBase.h"
 
+#include "Common/Core/PID/PIDTOFService.h"
 #include "Common/DataModel/EventSelection.h"
 #include "Common/DataModel/FT0Corrected.h"
 #include "Common/DataModel/Multiplicity.h"
